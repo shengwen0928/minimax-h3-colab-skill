@@ -48,7 +48,7 @@ while (($#)); do
 done
 
 if [[ -z "$SKILLS_ROOT" ]]; then
-  CODEX_ROOT="${CODEX_HOME:-${HOME:-}}"
+  CODEX_ROOT="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
   [[ -n "$CODEX_ROOT" ]] || { echo "Set CODEX_HOME or HOME before installing the skill." >&2; exit 2; }
   SKILLS_ROOT="$CODEX_ROOT/skills"
 fi
