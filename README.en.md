@@ -177,9 +177,9 @@ python3 scripts/runner.py batch \
 ```
 
 - Clips are joined in manifest job order; the individual clips are kept.
-- With `--concat`, the runner checks that `ffmpeg` is available and that there are at least two jobs before creating a session, so a missing prerequisite does not waste compute.
+- With `--concat`, the runner checks that `ffmpeg` and `ffprobe` are available and that there are at least two jobs before creating a session, so a missing prerequisite does not waste compute.
 - Joining runs only when every job completed. If any job fails, joining is skipped and the result reports `concat.status` as `skipped`.
-- The runner first tries a fast stream copy and falls back to re-encoding with H.264/AAC when clip parameters differ.
+- Before joining, the runner uses `ffprobe` to compare each clip's codecs, frame size, frame rate, and audio format. Identical clips are joined with a fast stream copy; otherwise they are re-encoded with H.264/AAC, scaling and padding every clip to the first clip's frame size and converting audio to the first clip's format. (ffmpeg stream-copies mismatched clips without reporting an error but produces a file that breaks during playback, so falling back only on failure is not enough.)
 - Each clip is generated independently, so motion and lighting are not continuous across joins; placing each join at a shot change looks more natural. Each clip's `non_diegetic_music` is also generated separately, so consider requesting no score and adding one continuous music track after joining.
 
 Existing clips can also be joined directly, for example after re-running the jobs a partial batch missed:

@@ -67,7 +67,13 @@ else:
 '''
 
 FAKE_FFPROBE = r'''#!PYTHON_EXECUTABLE
-print('{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}')
+import json, pathlib, sys
+target = pathlib.Path(sys.argv[-1])
+width = 640 if target.is_file() and b"small" in target.read_bytes() else 1280
+print(json.dumps({"streams": [
+    {"codec_type": "video", "codec_name": "h264", "width": width, "height": 704, "pix_fmt": "yuv420p", "r_frame_rate": "24/1"},
+    {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 2, "channel_layout": "stereo"},
+]}))
 '''
 
 FAKE_FFMPEG = r'''#!PYTHON_EXECUTABLE
@@ -81,8 +87,12 @@ with (root / "calls.jsonl").open("a", encoding="utf-8") as stream:
 if mode == "copy" and os.environ.get("FAKE_FFMPEG_COPY_FAIL"):
     print("simulated stream-copy failure", file=sys.stderr)
     sys.exit(1)
-listing = pathlib.Path(args[args.index("-i") + 1]).read_text(encoding="utf-8")
-clips = [line[len("file '"):-1].replace("'\\''", "'") for line in listing.splitlines() if line]
+inputs = [args[i + 1] for i, value in enumerate(args[:-1]) if value == "-i"]
+if "concat" in args[:args.index("-i")]:
+    listing = pathlib.Path(inputs[0]).read_text(encoding="utf-8")
+    clips = [line[len("file '"):-1].replace("'\\''", "'") for line in listing.splitlines() if line]
+else:
+    clips = inputs
 pathlib.Path(args[-1]).write_bytes(b"".join(pathlib.Path(clip).read_bytes() for clip in clips))
 '''
 
@@ -259,6 +269,16 @@ class RunnerTests(unittest.TestCase):
             runner.concat_videos([first, output], output)
         with self.assertRaisesRegex(ValueError, "at least two"):
             runner.concat_videos([first], self.root / "single.mp4")
+
+    def test_concat_reencodes_mismatched_clips_without_trying_stream_copy(self) -> None:
+        first = self.root / "large.mp4"
+        second = self.root / "small.mp4"
+        first.write_bytes(b"large ")
+        second.write_bytes(b"small")
+        output = self.root / "joined.mp4"
+        self.assertEqual(runner.concat_videos([first, second], output), "reencode")
+        self.assertEqual(output.read_bytes(), b"large small")
+        self.assertEqual([call["mode"] for call in self.calls()], ["encode"])
 
     def test_shell_launcher_accepts_multiple_local_images_and_prompt_file(self) -> None:
         image_one = self.root / "ref-one.png"

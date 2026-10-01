@@ -403,18 +403,40 @@ def verify_mp4(path: Path) -> None:
         raise ValueError(f"Downloaded MP4 must contain video and audio streams; found {sorted(streams)}.")
 
 
-def _ffmpeg_path() -> str:
-    path = shutil.which("ffmpeg")
-    if not path:
-        raise FileNotFoundError("ffmpeg is required to join clips. Install it first, for example: sudo apt install ffmpeg")
-    return path
+CONCAT_FORMAT_KEYS = {
+    "video": ("codec_name", "width", "height", "pix_fmt", "r_frame_rate"),
+    "audio": ("codec_name", "sample_rate", "channels", "channel_layout"),
+}
 
 
-def concat_videos(inputs: list[Path], output: Path) -> Path:
-    """Join clips in order into one MP4, stream-copying when the clips allow it."""
+def _ffmpeg_paths() -> tuple[str, str]:
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise FileNotFoundError("ffmpeg and ffprobe are required to join clips. Install them first, for example: sudo apt install ffmpeg")
+    return ffmpeg, ffprobe
+
+
+def _clip_streams(ffprobe: str, clip: Path) -> dict[str, dict[str, Any]]:
+    entries = ",".join(["codec_type", *{key for keys in CONCAT_FORMAT_KEYS.values() for key in keys}])
+    probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", f"stream={entries}", "-of", "json", str(clip)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if probe.returncode != 0:
+        raise ValueError(f"Clip to join is not a readable video: {clip}: {clean_output(probe.stderr)}")
+    streams: dict[str, dict[str, Any]] = {}
+    for item in json.loads(probe.stdout).get("streams", []):
+        streams.setdefault(item.get("codec_type"), item)
+    if not {"video", "audio"} <= streams.keys():
+        raise ValueError(f"Clip to join must contain video and audio streams: {clip}")
+    return streams
+
+
+def concat_videos(inputs: list[Path], output: Path) -> str:
+    """Join clips in order into one MP4 and return "copy" or "reencode" for the method used."""
     if len(inputs) < 2:
         raise ValueError("Joining needs at least two clips.")
-    ffmpeg = _ffmpeg_path()
+    ffmpeg, ffprobe = _ffmpeg_paths()
     clips = [Path(item).expanduser().resolve() for item in inputs]
     for clip in clips:
         if not clip.is_file() or clip.stat().st_size == 0:
@@ -423,32 +445,59 @@ def concat_videos(inputs: list[Path], output: Path) -> Path:
     if output in clips:
         raise ValueError(f"Joined output must not overwrite one of its clips: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
+    formats = [_clip_streams(ffprobe, clip) for clip in clips]
+    signatures = {
+        tuple(streams[kind].get(key) for kind, keys in CONCAT_FORMAT_KEYS.items() for key in keys)
+        for streams in formats
+    }
     token = uuid.uuid4().hex[:8]
     list_file = output.with_name(f".{output.stem}.{token}.concat.txt")
     partial = output.with_name(f".{output.stem}.{token}.partial.mp4")
-    # The concat demuxer list quotes paths with ' and escapes embedded quotes as '\''.
-    list_file.write_text("".join("file '" + str(clip).replace("'", "'\\''") + "'\n" for clip in clips), encoding="utf-8")
-    base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+    mode = "reencode"
     try:
-        copied = subprocess.run(
-            [*base, "-c", "copy", "-movflags", "+faststart", str(partial)],
-            capture_output=True, text=True, timeout=600, check=False,
-        )
-        if copied.returncode != 0:
-            # Clips whose encoding parameters differ cannot be stream-copied; re-encode instead.
-            encoded = subprocess.run(
-                [*base, "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
-                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial)],
-                capture_output=True, text=True, timeout=3600, check=False,
+        # ffmpeg stream-copies mismatched clips without error but produces a broken file,
+        # so copy only when every clip shares the same stream parameters.
+        if len(signatures) == 1:
+            # The concat demuxer list quotes paths with ' and escapes embedded quotes as '\''.
+            list_file.write_text("".join("file '" + str(clip).replace("'", "'\\''") + "'\n" for clip in clips), encoding="utf-8")
+            copied = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+                 "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(partial)],
+                capture_output=True, text=True, timeout=600, check=False,
             )
+            if copied.returncode == 0:
+                mode = "copy"
+        if mode == "reencode":
+            # Conform every clip to the first clip's frame size, frame rate, and audio format.
+            video, audio = formats[0]["video"], formats[0]["audio"]
+            width, height = video["width"], video["height"]
+            rate = audio["sample_rate"]
+            layout = audio.get("channel_layout") or f"{audio.get('channels', 2)}c"
+            filters = []
+            for index in range(len(clips)):
+                filters.append(
+                    f"[{index}:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={video.get('r_frame_rate', '24/1')},format=yuv420p[v{index}]"
+                )
+                filters.append(f"[{index}:a:0]aresample={rate},aformat=sample_rates={rate}:channel_layouts={layout}[a{index}]")
+            filters.append("".join(f"[v{index}][a{index}]" for index in range(len(clips))) + f"concat=n={len(clips)}:v=1:a=1[v][a]")
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+            for clip in clips:
+                command.extend(["-i", str(clip)])
+            command.extend([
+                "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial),
+            ])
+            encoded = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
             if encoded.returncode != 0:
-                raise ValueError(f"ffmpeg could not join the clips: {clean_output(encoded.stderr or copied.stderr)}")
+                raise ValueError(f"ffmpeg could not join the clips: {clean_output(encoded.stderr)}")
         verify_mp4(partial)
         os.replace(partial, output)
     finally:
         list_file.unlink(missing_ok=True)
         partial.unlink(missing_ok=True)
-    return output
+    return mode
 
 
 def run_batch(
@@ -475,7 +524,7 @@ def run_batch(
             raise ValueError("Joining needs at least two jobs in the manifest.")
         if concat_output in {job["output_path"] for job in jobs}:
             raise ValueError(f"Joined output must not overwrite one of the job outputs: {concat_output}")
-        _ffmpeg_path()
+        _ffmpeg_paths()
     owns_session = session is None or create_session_if_named
     if session is None:
         session = f"h3-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:6]}"
@@ -619,8 +668,8 @@ def run_batch(
             progress["updated_at"] = now_iso()
             write_progress(progress_path, progress)
             try:
-                concat_videos([job["output_path"] for job in jobs], concat_output)
-                progress["concat"] = {"status": "completed", "output": str(concat_output), "bytes": concat_output.stat().st_size}
+                mode = concat_videos([job["output_path"] for job in jobs], concat_output)
+                progress["concat"] = {"status": "completed", "output": str(concat_output), "mode": mode, "bytes": concat_output.stat().st_size}
             except Exception as exc:
                 batch_error = f"All clips completed, but joining them failed: {exc}"
                 progress["concat"] = {"status": "failed", "output": str(concat_output), "error": str(exc)}
@@ -751,8 +800,9 @@ def main() -> int:
             print(json.dumps(progress, ensure_ascii=False))
             return 0 if progress["status"] == "completed" else 1
         if args.command == "concat":
-            output = concat_videos(args.clips, args.output)
-            print(f"Saved joined video: {output}")
+            mode = concat_videos(args.clips, args.output)
+            note = "stream copy" if mode == "copy" else "re-encoded to match the first clip"
+            print(f"Saved joined video ({note}): {args.output.expanduser().resolve()}")
             return 0
     except Exception as exc:
         if args.command == "usage" and args.json:
