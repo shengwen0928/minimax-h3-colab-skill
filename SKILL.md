@@ -14,6 +14,7 @@ Use the bundled notebook and `scripts/runner.py` to generate Ref2VA video from l
 3. Check Colab access and balance with `python3 scripts/runner.py usage --json`. Sufficient compute units do not guarantee that Colab will allocate the requested GPU or high-memory runtime. Report allocation failures plainly.
 4. Put the jobs in a UTF-8 JSON manifest and run one batch. The runner uploads each job's images and prompt, executes the bundled notebook sequentially on the same live session, downloads each MP4, and stops the session when it created it. If reusing a session, pass `--stop-on-complete` when the user wants it stopped after the batch.
 5. Confirm each output exists and report its local path. Preserve completed clips if a later job fails.
+6. When the user wants a video longer than 15 seconds, split it into ordered jobs in one manifest and pass `--concat /absolute/path/outputs/full.mp4` to join the clips in manifest order after every job completes (requires `ffmpeg`). Place joins at shot changes and avoid per-clip background music, since each clip is generated independently. To join existing clips, run `python3 scripts/runner.py concat --output OUT.mp4 CLIP1.mp4 CLIP2.mp4 ...`.
 
 Example manifest:
 

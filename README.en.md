@@ -19,7 +19,7 @@ The local machine only prepares and uploads inputs. Model inference runs on the 
 - [`google-colab-cli`](https://pypi.org/project/google-colab-cli/). The runner was validated with Colab CLI 0.7.4 and uses the documented `version`, `usage`, `new`, `upload`, `exec`, `download`, and `stop` commands. The current CLI release requires Python 3.12 or newer; `uv` can install that interpreter separately from the runner's Python 3.11+ requirement.
 - A Google account with access to Colab compute units and a GPU shape that can be allocated. An A100 or equivalent high-memory runtime may require the appropriate Colab plan and available balance.
 
-The optional `ffprobe` program is used to verify that a downloaded MP4 contains both video and audio streams. If `ffprobe` is not installed, the runner still checks that the file exists and is non-empty.
+The optional `ffprobe` program is used to verify that a downloaded MP4 contains both video and audio streams. If `ffprobe` is not installed, the runner still checks that the file exists and is non-empty. Joining several clips into one video requires `ffmpeg` (on Ubuntu, `sudo apt install ffmpeg`, which also installs `ffprobe`).
 
 ## Clone and install the skill
 
@@ -165,6 +165,31 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/minimax-h3-colab/scripts/runner.py" 
   batch --manifest /absolute/path/jobs.json --output-dir /absolute/path/outputs
 ```
 
+### Joining clips into a longer video
+
+A single H3 clip is at most 15 seconds. For a longer video, split the story into several jobs in one manifest and add `--concat`:
+
+```bash
+python3 scripts/runner.py batch \
+  --manifest /absolute/path/jobs.json \
+  --output-dir /absolute/path/outputs \
+  --concat /absolute/path/outputs/full.mp4
+```
+
+- Clips are joined in manifest job order; the individual clips are kept.
+- With `--concat`, the runner checks that `ffmpeg` is available and that there are at least two jobs before creating a session, so a missing prerequisite does not waste compute.
+- Joining runs only when every job completed. If any job fails, joining is skipped and the result reports `concat.status` as `skipped`.
+- The runner first tries a fast stream copy and falls back to re-encoding with H.264/AAC when clip parameters differ.
+- Each clip is generated independently, so motion and lighting are not continuous across joins; placing each join at a shot change looks more natural. Each clip's `non_diegetic_music` is also generated separately, so consider requesting no score and adding one continuous music track after joining.
+
+Existing clips can also be joined directly, for example after re-running the jobs a partial batch missed:
+
+```bash
+python3 scripts/runner.py concat \
+  --output /absolute/path/outputs/full.mp4 \
+  /absolute/path/outputs/part1.mp4 /absolute/path/outputs/part2.mp4
+```
+
 ## Prompt and image rules
 
 - Each job needs 1–9 non-empty local reference images.
@@ -202,7 +227,7 @@ python3 scripts/runner.py --help
 ./run_colab_inference.sh --help
 ```
 
-The tests replace `colab` and `ffprobe` with local fakes, so they do not spend compute units or access credentials.
+The tests replace `colab`, `ffprobe`, and `ffmpeg` with local fakes, so they do not spend compute units or access credentials.
 
 ## Scope and safety
 

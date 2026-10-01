@@ -19,7 +19,7 @@
 - [`google-colab-cli`](https://pypi.org/project/google-colab-cli/)。本 runner 已用 Colab CLI 0.7.4 驗證，使用文件所列的 `version`、`usage`、`new`、`upload`、`exec`、`download`、`stop` 指令。目前的 CLI 版本需要 Python 3.12 以上；`uv` 可以另外管理 CLI 使用的 Python，不影響 runner 的 Python 3.11 以上需求。
 - 可使用 Colab compute units 且能配置 GPU 的 Google 帳號。A100 或其他高記憶體 runtime 可能需要對應的 Colab 方案與足夠餘額。
 
-如果系統有安裝選用的 `ffprobe`，runner 會檢查下載的 MP4 是否同時包含視訊與音訊串流。沒有 `ffprobe` 時，仍會檢查檔案存在且大小不為零。
+如果系統有安裝選用的 `ffprobe`，runner 會檢查下載的 MP4 是否同時包含視訊與音訊串流。沒有 `ffprobe` 時，仍會檢查檔案存在且大小不為零。要把多支片段接成一支影片時需要 `ffmpeg`（Ubuntu 可用 `sudo apt install ffmpeg`，會一併安裝 `ffprobe`）。
 
 ## Clone 與安裝技能
 
@@ -165,6 +165,31 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/minimax-h3-colab/scripts/runner.py" 
   batch --manifest /absolute/path/jobs.json --output-dir /absolute/path/outputs
 ```
 
+### 接成一支較長的影片
+
+H3 單支影片最長 15 秒。要做更長的影片，請把劇情拆成多個工作放進同一份 manifest，並加上 `--concat`：
+
+```bash
+python3 scripts/runner.py batch \
+  --manifest /absolute/path/jobs.json \
+  --output-dir /absolute/path/outputs \
+  --concat /absolute/path/outputs/full.mp4
+```
+
+- 片段依 manifest 中的工作順序接合，各片段仍會保留。
+- 啟用 `--concat` 時，runner 會在建立 session 前確認 `ffmpeg` 存在且至少有兩個工作，避免算完才發現無法接合。
+- 只有全部工作都完成才會接合；任一工作失敗時會略過接合，結果中的 `concat.status` 為 `skipped`。
+- 先嘗試不重新編碼的快速接合，片段參數不一致時改用 H.264/AAC 重新編碼。
+- 片段是各自獨立生成的，接點的動作與光線不會完全連續；把接點安排在換鏡頭處會比較自然。每段的 `non_diegetic_music` 也各自生成，建議寫成不要配樂，接好後再另外加整條背景音樂。
+
+已經有片段時（例如批次只完成一部分，補跑缺少的片段後），也可以直接接合：
+
+```bash
+python3 scripts/runner.py concat \
+  --output /absolute/path/outputs/full.mp4 \
+  /absolute/path/outputs/part1.mp4 /absolute/path/outputs/part2.mp4
+```
+
 ## Prompt 與圖片規則
 
 - 每個工作需要 1–9 張非空白本機參照圖片。
@@ -202,7 +227,7 @@ python3 scripts/runner.py --help
 ./run_colab_inference.sh --help
 ```
 
-測試會以本機 fake `colab` 與 `ffprobe` 取代真實程式，因此不會消耗 compute units，也不會存取認證資料。
+測試會以本機 fake `colab`、`ffprobe` 與 `ffmpeg` 取代真實程式，因此不會消耗 compute units，也不會存取認證資料。
 
 ## 範圍與安全
 

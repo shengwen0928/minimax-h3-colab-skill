@@ -70,6 +70,22 @@ FAKE_FFPROBE = r'''#!PYTHON_EXECUTABLE
 print('{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}')
 '''
 
+FAKE_FFMPEG = r'''#!PYTHON_EXECUTABLE
+import json, os, pathlib, sys
+args = sys.argv[1:]
+mode = "copy" if "copy" in args else "encode"
+root = pathlib.Path(os.environ["FAKE_COLAB_STATE_DIR"])
+root.mkdir(parents=True, exist_ok=True)
+with (root / "calls.jsonl").open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"command": "ffmpeg", "mode": mode}) + "\n")
+if mode == "copy" and os.environ.get("FAKE_FFMPEG_COPY_FAIL"):
+    print("simulated stream-copy failure", file=sys.stderr)
+    sys.exit(1)
+listing = pathlib.Path(args[args.index("-i") + 1]).read_text(encoding="utf-8")
+clips = [line[len("file '"):-1].replace("'\\''", "'") for line in listing.splitlines() if line]
+pathlib.Path(args[-1]).write_bytes(b"".join(pathlib.Path(clip).read_bytes() for clip in clips))
+'''
+
 
 class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -77,7 +93,7 @@ class RunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
-        for name, content in (("colab", FAKE_COLAB), ("ffprobe", FAKE_FFPROBE)):
+        for name, content in (("colab", FAKE_COLAB), ("ffprobe", FAKE_FFPROBE), ("ffmpeg", FAKE_FFMPEG)):
             path = self.fake_bin / name
             path.write_text(content.replace("PYTHON_EXECUTABLE", sys.executable), encoding="utf-8")
             path.chmod(0o755)
@@ -187,6 +203,62 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["failed_count"], 1)
         self.assertTrue(Path(result["results"][0]["output"]).is_file())
         self.assertEqual(sum(call["command"] == "stop" for call in self.calls()), 1)
+
+    def test_batch_joins_completed_clips_in_manifest_order(self) -> None:
+        manifest = self.manifest(2)
+        joined = self.root / "outputs" / "full.mp4"
+        result = runner.run_batch(
+            manifest, session=None, gpu="A100", high_mem=True, stop_on_complete=False,
+            progress_path=None, output_dir=self.root / "outputs", exec_timeout=100,
+            concat_output=joined,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["concat"]["status"], "completed")
+        self.assertEqual(joined.read_bytes(), b"fake video bytes" * 2)
+        self.assertEqual([call["mode"] for call in self.calls() if call["command"] == "ffmpeg"], ["copy"])
+        self.assertEqual(list(joined.parent.glob(".full.*")), [])
+
+    def test_batch_skips_joining_when_a_job_fails(self) -> None:
+        manifest = self.manifest(2)
+        joined = self.root / "outputs" / "full.mp4"
+        with patch.dict(os.environ, {"FAKE_FAIL_PREFIX": "MiniMax_H3_job-1"}):
+            result = runner.run_batch(
+                manifest, session=None, gpu="A100", high_mem=False, stop_on_complete=False,
+                progress_path=None, output_dir=self.root / "outputs", exec_timeout=100,
+                concat_output=joined,
+            )
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["concat"]["status"], "skipped")
+        self.assertFalse(joined.exists())
+        self.assertFalse(any(call["command"] == "ffmpeg" for call in self.calls()))
+
+    def test_batch_with_join_requires_ffmpeg_before_starting_a_session(self) -> None:
+        (self.fake_bin / "ffmpeg").unlink()
+        real_which = runner.shutil.which
+        manifest = self.manifest(2)
+        with patch.object(runner.shutil, "which", lambda name: None if name == "ffmpeg" else real_which(name)):
+            with self.assertRaisesRegex(FileNotFoundError, "ffmpeg"):
+                runner.run_batch(
+                    manifest, session=None, gpu="A100", high_mem=True, stop_on_complete=False,
+                    progress_path=None, output_dir=self.root / "outputs", exec_timeout=100,
+                    concat_output=self.root / "full.mp4",
+                )
+        self.assertFalse((self.state_dir / "calls.jsonl").exists())
+
+    def test_concat_falls_back_to_reencoding_and_keeps_order(self) -> None:
+        first = self.root / "it's-a.mp4"
+        second = self.root / "b.mp4"
+        first.write_bytes(b"first ")
+        second.write_bytes(b"second")
+        output = self.root / "joined.mp4"
+        with patch.dict(os.environ, {"FAKE_FFMPEG_COPY_FAIL": "1"}):
+            runner.concat_videos([second, first], output)
+        self.assertEqual(output.read_bytes(), b"secondfirst ")
+        self.assertEqual([call["mode"] for call in self.calls()], ["copy", "encode"])
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            runner.concat_videos([first, output], output)
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            runner.concat_videos([first], self.root / "single.mp4")
 
     def test_shell_launcher_accepts_multiple_local_images_and_prompt_file(self) -> None:
         image_one = self.root / "ref-one.png"

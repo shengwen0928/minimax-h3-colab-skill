@@ -403,6 +403,54 @@ def verify_mp4(path: Path) -> None:
         raise ValueError(f"Downloaded MP4 must contain video and audio streams; found {sorted(streams)}.")
 
 
+def _ffmpeg_path() -> str:
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise FileNotFoundError("ffmpeg is required to join clips. Install it first, for example: sudo apt install ffmpeg")
+    return path
+
+
+def concat_videos(inputs: list[Path], output: Path) -> Path:
+    """Join clips in order into one MP4, stream-copying when the clips allow it."""
+    if len(inputs) < 2:
+        raise ValueError("Joining needs at least two clips.")
+    ffmpeg = _ffmpeg_path()
+    clips = [Path(item).expanduser().resolve() for item in inputs]
+    for clip in clips:
+        if not clip.is_file() or clip.stat().st_size == 0:
+            raise FileNotFoundError(f"Clip to join is missing or empty: {clip}")
+    output = output.expanduser().resolve()
+    if output in clips:
+        raise ValueError(f"Joined output must not overwrite one of its clips: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:8]
+    list_file = output.with_name(f".{output.stem}.{token}.concat.txt")
+    partial = output.with_name(f".{output.stem}.{token}.partial.mp4")
+    # The concat demuxer list quotes paths with ' and escapes embedded quotes as '\''.
+    list_file.write_text("".join("file '" + str(clip).replace("'", "'\\''") + "'\n" for clip in clips), encoding="utf-8")
+    base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+    try:
+        copied = subprocess.run(
+            [*base, "-c", "copy", "-movflags", "+faststart", str(partial)],
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+        if copied.returncode != 0:
+            # Clips whose encoding parameters differ cannot be stream-copied; re-encode instead.
+            encoded = subprocess.run(
+                [*base, "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(partial)],
+                capture_output=True, text=True, timeout=3600, check=False,
+            )
+            if encoded.returncode != 0:
+                raise ValueError(f"ffmpeg could not join the clips: {clean_output(encoded.stderr or copied.stderr)}")
+        verify_mp4(partial)
+        os.replace(partial, output)
+    finally:
+        list_file.unlink(missing_ok=True)
+        partial.unlink(missing_ok=True)
+    return output
+
+
 def run_batch(
     manifest_path: Path,
     *,
@@ -414,11 +462,20 @@ def run_batch(
     output_dir: Path,
     exec_timeout: float,
     create_session_if_named: bool = False,
+    concat_output: Path | None = None,
 ) -> dict[str, Any]:
     if not NOTEBOOK.is_file():
         raise FileNotFoundError(f"Bundled inference notebook not found: {NOTEBOOK}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     jobs = resolve_jobs(manifest, output_dir)
+    if concat_output is not None:
+        # Check joining prerequisites before a session starts spending compute units.
+        concat_output = concat_output.expanduser().resolve()
+        if len(jobs) < 2:
+            raise ValueError("Joining needs at least two jobs in the manifest.")
+        if concat_output in {job["output_path"] for job in jobs}:
+            raise ValueError(f"Joined output must not overwrite one of the job outputs: {concat_output}")
+        _ffmpeg_path()
     owns_session = session is None or create_session_if_named
     if session is None:
         session = f"h3-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:6]}"
@@ -554,6 +611,20 @@ def run_batch(
             progress["session_status"] = "active"
         shutil.rmtree(work_root, ignore_errors=True)
 
+    if concat_output is not None:
+        if batch_error or len(results) != len(jobs):
+            progress["concat"] = {"status": "skipped", "output": str(concat_output), "reason": "not every job completed"}
+        else:
+            progress["status"] = "joining"
+            progress["updated_at"] = now_iso()
+            write_progress(progress_path, progress)
+            try:
+                concat_videos([job["output_path"] for job in jobs], concat_output)
+                progress["concat"] = {"status": "completed", "output": str(concat_output), "bytes": concat_output.stat().st_size}
+            except Exception as exc:
+                batch_error = f"All clips completed, but joining them failed: {exc}"
+                progress["concat"] = {"status": "failed", "output": str(concat_output), "error": str(exc)}
+
     completed = sum(item["status"] == "completed" for item in progress["jobs"])
     failed = sum(item["status"] == "failed" for item in progress["jobs"])
     cancelled = sum(item["status"] == "cancelled" for item in progress["jobs"])
@@ -596,6 +667,11 @@ def main() -> int:
     batch_parser.add_argument("--progress", type=Path)
     batch_parser.add_argument("--output-dir", type=Path, default=Path("output"))
     batch_parser.add_argument("--timeout", type=float, default=float(os.environ.get("COLAB_EXEC_TIMEOUT", "3600")))
+    batch_parser.add_argument("--concat", type=Path, help="After every job completes, join the clips in manifest order into this MP4")
+
+    concat_parser = sub.add_parser("concat", help="Join existing clips in the given order into one MP4")
+    concat_parser.add_argument("clips", type=Path, nargs="+")
+    concat_parser.add_argument("--output", "-o", type=Path, required=True)
 
     single_parser = sub.add_parser("single", help="Compatibility interface for run_colab_inference.sh")
     single_parser.add_argument("--image", "-i", action="append", required=True)
@@ -670,9 +746,14 @@ def main() -> int:
                 progress_path=args.progress.expanduser().resolve() if args.progress else None,
                 output_dir=args.output_dir.expanduser().resolve(),
                 exec_timeout=args.timeout,
+                concat_output=args.concat,
             )
             print(json.dumps(progress, ensure_ascii=False))
             return 0 if progress["status"] == "completed" else 1
+        if args.command == "concat":
+            output = concat_videos(args.clips, args.output)
+            print(f"Saved joined video: {output}")
+            return 0
     except Exception as exc:
         if args.command == "usage" and args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
