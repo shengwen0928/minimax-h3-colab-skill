@@ -47,7 +47,8 @@ elif command == "exec":
     envs = [args[i + 1] for i, value in enumerate(args[:-1]) if value == "--env"]
     values = dict(item.split("=", 1) for item in envs)
     output = values["H3_OUTPUT_PATH"]
-    record("exec", output=output, refs=json.loads(values["H3_REFERENCE_IMAGES"]), prompt=values["H3_PROMPT_FILE"])
+    record("exec", output=output, refs=json.loads(values["H3_REFERENCE_IMAGES"]), prompt=values["H3_PROMPT_FILE"],
+           size=[int(values["H3_WIDTH"]), int(values["H3_HEIGHT"])])
     if values.get("H3_OUTPUT_PREFIX") == os.environ.get("FAKE_FAIL_PREFIX"):
         print("simulated inference failure", file=sys.stderr)
         sys.exit(7)
@@ -315,6 +316,23 @@ class RunnerTests(unittest.TestCase):
         data["jobs"][1]["output_path"] = str(self.root / "same.mp4")
         data["jobs"][0]["output_path"] = str(self.root / "same.mp4")
         with self.assertRaisesRegex(ValueError, "same output path"):
+            runner.resolve_jobs(data, self.root / "output")
+
+    def test_orientation_defaults_from_manifest_and_job_can_override(self) -> None:
+        manifest = self.manifest(2)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["orientation"] = "portrait"
+        data["jobs"][1]["orientation"] = "landscape"
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        result = runner.run_batch(
+            manifest, session=None, gpu="A100", high_mem=True, stop_on_complete=False,
+            progress_path=None, output_dir=self.root / "outputs", exec_timeout=100,
+        )
+        self.assertEqual(result["status"], "completed")
+        sizes = [call["size"] for call in self.calls() if call["command"] == "exec"]
+        self.assertEqual(sizes, [[768, 1376], [1376, 768]])
+        data["jobs"][0]["orientation"] = "square"
+        with self.assertRaisesRegex(ValueError, "orientation"):
             runner.resolve_jobs(data, self.root / "output")
 
     def test_resolve_jobs_rejects_picture_tags_outside_uploaded_references(self) -> None:

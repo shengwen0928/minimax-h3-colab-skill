@@ -26,6 +26,8 @@ NOTEBOOK = SKILL_DIR / "assets" / "MiniMax_H3_Turbo_Colab.ipynb"
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PICTURE_RE = re.compile(r"<Picture\s+(\d+)>")
 NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+# Frame sizes the notebook renders; portrait swaps the default 16:9 shape for YouTube Shorts.
+ORIENTATIONS = {"landscape": (1376, 768), "portrait": (768, 1376)}
 AUTH = os.environ.get("COLAB_AUTH", "oauth2")
 
 
@@ -357,6 +359,10 @@ def resolve_jobs(manifest: dict[str, Any], output_dir: Path) -> list[dict[str, A
         duration = float(raw.get("duration_seconds", raw.get("duration", 12)))
         if not math.isfinite(duration) or not 4 <= duration <= 15:
             raise ValueError(f"Job {index} duration must be between 4 and 15 seconds.")
+        orientation = str(raw.get("orientation") or manifest.get("orientation") or "landscape")
+        if orientation not in ORIENTATIONS:
+            raise ValueError(f"Job {index} orientation must be one of {sorted(ORIENTATIONS)}.")
+        width, height = ORIENTATIONS[orientation]
         seed = raw.get("seed")
         seed = random.SystemRandom().randrange(0, 2**64) if seed in (None, "") else int(seed)
         if not 0 <= seed < 2**64:
@@ -378,6 +384,8 @@ def resolve_jobs(manifest: dict[str, Any], output_dir: Path) -> list[dict[str, A
             "reference_images": image_paths,
             "duration_seconds": duration,
             "seed": seed,
+            "width": width,
+            "height": height,
             "output_path": output,
         })
     return resolved
@@ -598,6 +606,8 @@ def run_batch(
                 "H3_REFERENCE_IMAGES=" + json.dumps(remote_refs, separators=(",", ":")),
                 "H3_PROMPT_FILE=" + remote_prompt,
                 "H3_DURATION_SECONDS=" + str(job["duration_seconds"]),
+                "H3_WIDTH=" + str(job["width"]),
+                "H3_HEIGHT=" + str(job["height"]),
                 "H3_SEED=" + str(job["seed"]),
                 "H3_OUTPUT_PREFIX=MiniMax_H3_" + job["id"][:20],
                 "H3_OUTPUT_PATH=" + remote_output,

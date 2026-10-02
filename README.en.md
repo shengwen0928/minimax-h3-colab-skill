@@ -165,6 +165,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/minimax-h3-colab/scripts/runner.py" 
   batch --manifest /absolute/path/jobs.json --output-dir /absolute/path/outputs
 ```
 
+### Vertical video (YouTube Shorts)
+
+Add `"orientation": "portrait"` at the top level of the manifest to render every job at 768 × 1376 (9:16); a job can override it with its own `"orientation"`. The default is `"landscape"` (1376 × 768).
+
 ### Joining clips into a longer video
 
 A single H3 clip is at most 15 seconds. For a longer video, split the story into several jobs in one manifest and add `--concat`:

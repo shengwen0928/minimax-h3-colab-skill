@@ -165,6 +165,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/minimax-h3-colab/scripts/runner.py" 
   batch --manifest /absolute/path/jobs.json --output-dir /absolute/path/outputs
 ```
 
+### 直式影片（YouTube Shorts）
+
+在 manifest 最外層加上 `"orientation": "portrait"`，所有工作就會以 768 × 1376 的 9:16 直式生成；個別工作也可以用自己的 `"orientation"` 覆蓋。預設是 `"landscape"`（1376 × 768）。
+
 ### 接成一支較長的影片
 
 H3 單支影片最長 15 秒。要做更長的影片，請把劇情拆成多個工作放進同一份 manifest，並加上 `--concat`：

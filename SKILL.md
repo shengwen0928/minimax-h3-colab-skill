@@ -43,6 +43,7 @@ Use `--no-high-mem` when high-memory allocation is unavailable or not desired. F
 ## Operational limits
 
 - Each job requires 1–9 non-empty reference images, a non-empty UTF-8 prompt, and a duration from 4–15 seconds.
+- For YouTube Shorts or other vertical video, set `"orientation": "portrait"` at the manifest top level (768 × 1376); jobs may override it. The default is `"landscape"` (1376 × 768).
 - Keep all jobs in one batch to reuse the same Colab session and loaded ComfyUI/model state.
 - Do not blindly retry a timed-out `colab exec`: the remote kernel may still be working. The runner stops the session during cleanup and records completed jobs before reporting the failure.
 - Do not expose OAuth credentials or runtime tokens in prompts, manifests, browser state, or logs.
